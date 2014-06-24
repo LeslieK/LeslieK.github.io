@@ -1,0 +1,53 @@
+<p><strong>The question...</strong></p>
+<p>How could I instrument the code that implements the dictionary so that I can count the collisions for each key inserted? I wanted to get under the hood of the dictionary, put some probes on the wires, and expose what goes on. But how???</p>
+<blockquote>
+<p>Q: How to we get an instance of PyDictObject that underlies our dictionary, d = {1:1, 2:2, 3:3}?</p>
+<p>A:&nbsp;<strong>cast</strong>(id(d), <strong>POINTER</strong>(PyDictObject))<strong>.contents</strong></p>
+</blockquote>
+<p><strong>The Answer, In English...</strong></p>
+<p>We instantiate a pointer to data type PyDictObject and initialize it with the address of the dictionary d. We then dereference the pointer to get the PyDictObject object underlying dictionary d.</p>
+<p>dictobj =&nbsp;<strong>cast</strong>(id(d),&nbsp;<strong>POINTER</strong>(PyDictObject))<strong>.contents</strong></p>
+<p><strong>How do we access the key-value pairs stored in dictobj?</strong></p>
+<p>By knowing the layout of the PyDictObject type, we can access its nested fields until we get to the array holding the dictionary data.</p>
+<p><strong>How do I write python code that is based on the C source?</strong></p>
+<p>One good way to get started is to read code that someone else wrote. By starting with <a href="https://bitbucket.org/brandon/pycon2010-mighty-dictionary/src/ebd9eb16d203182cb366eb7db23bcd4e806da9f3/figures/_dictinfo.py?at=default" target="_blank">this code</a> I learned some patterns. To figure out what to do for python 3.3, I had to read the source code <a href="http://hg.python.org/cpython/file/3.3/Objects/dictobject.c" target="_blank">dictobject.c</a> and <a href="http://hg.python.org/cpython/file/3.3/Include/dictobject.h" target="_blank">dictobject.h</a>. &nbsp;I started with the C structs provided in the source.</p>
+<blockquote>
+<p><strong>What's a C struct?</strong> In python, think "class". It is a way of grouping together data types into a higher-level, more abstract data type.</p>
+</blockquote>
+<p><strong>Digging in ... The PyDictObject Type</strong></p>
+<p>Three C structs are involved in defining the dictionary: PyDictObject, PyDictKeysObject, and PyDictKeyEntry.</p>
+<p><strong>PyDictObject</strong> is the top-level struct that contains fields (in python, think attributes), one of which is <strong>PyDictKeysObject</strong>. This is another struct that contains fields, one of which is an array called dk_entries. Each element of the array is a <strong>PyDictKeyEntry</strong>, which is another struct that contains the fields of a key-value pair. When we insert key-value pairs into a dictionary, they reside in the fundamental data structure -- an array -- called dk_entries.</p>
+<p>The ctypes module allows a python programmer to translate the C structs into python classes. Here are the structs underlying the python dictionary:</p>
+<blockquote>
+<p>class <strong>PyDictKeyEntry</strong>(Structure):<br /> """An entry in a dictionary."""<br />&nbsp; &nbsp;_fields_ = [ ('me_hash', c_ulong),<br />&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;('me_key', py_object),<br />&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;('me_value', py_object), ]</p>
+</blockquote>
+<p>The field names are identical to those in the C code. The field types are provided by<a href="https://docs.python.org/3.3/library/ctypes.html#fundamental-data-types" target="_blank"> this table</a> in the ctypes module docs. I had a question about the type for<em> me_hash</em>, which is defined in the source code as <em>Py_hash_t</em>. This type is not documented anywhere. Is c_ulong the best choice? Is it portable to Windows, Linux, Mac OS (32/64 bit) or is c_size_t better? Experience certainly helps.</p>
+<p>The PyDictKeysObject was the trickiest struct to translate into a python class because its last field is variable length. In the definition, the last field is a dk_entries array of size 1 (ie, 1 PyDictKeyEntry). As keys are added to the dictionary, this array grows.</p>
+<blockquote>
+<p>class <strong>PyDictKeysObject</strong>(Structure):<br /> """An object of key entries."""<br /> _fields_ = [<br />&nbsp; &nbsp; &nbsp;('dk_refcnt', c_ssize_t),<br />&nbsp; &nbsp; &nbsp; ('dk_size', c_ssize_t),<br />&nbsp; &nbsp; &nbsp; ('dk_lookup', LOOKUPFUNC), # a function prototype&nbsp;<br />&nbsp; &nbsp; &nbsp; ('dk_usable', c_ssize_t),<br />&nbsp; &nbsp; &nbsp; (<strong>'dk_entries', PyDictKeyEntry * 1)</strong>, ]</p>
+<p># an array of size 1; size grows as keys are inserted into dictionary; this variable-sized field was the trickiest part to translate into python</p>
+<p>The top-level struct is the dictionary object, PyDictObject:<br /> <strong>PyDictObject</strong>._fields_ = [<br />&nbsp; &nbsp; &nbsp; &nbsp; &nbsp;('ob_refcnt', c_ssize_t), <br />&nbsp; &nbsp; &nbsp; &nbsp; &nbsp;('ob_type', c_void_p), # not in the docs<br />&nbsp; &nbsp; &nbsp; &nbsp; &nbsp;('ma_used', c_ssize_t),<br />&nbsp; &nbsp; &nbsp; &nbsp; &nbsp;(<strong>'ma_keys', POINTER(PyDictKeysObject)</strong>),<br />&nbsp; &nbsp; &nbsp; &nbsp; &nbsp;('ma_values', POINTER(py_object)), <br />&nbsp; &nbsp; &nbsp; &nbsp; &nbsp;]</p>
+</blockquote>
+<p><strong>So, how to we get an instance of PyDictObject that underlies our dictionary, d = {1:1, 2:2, 3:3}?</strong></p>
+<p>obj is the PyDictObject instance that contains the key-value pairs:</p>
+<blockquote>
+<p><strong>obj</strong> = cast(id(d), POINTER(PyDictObject)).contents</p>
+</blockquote>
+<p><strong>How do we get our keys out of this obj?</strong></p>
+<p>By navigating down the structure of PyDictObject, we can access the keys. First get the PyDictKeysObject object:</p>
+<blockquote>
+<p><strong>key_obj</strong> = <strong>obj</strong>.ma_keys.contents</p>
+</blockquote>
+<p><strong>And Finally....Our key!!!</strong></p>
+<p><span>A pointer to the key stored in slot 0 of the dictionary is:</span></p>
+<blockquote>
+<p><strong>key_obj</strong>.dk_entries[0].me_key &nbsp;!!! <strong>This is our key</strong><br /><br /></p>
+</blockquote>
+<p><strong>A Few Things I learned along the way....</strong></p>
+<p>C89, C99, POSIX: need to know this to ensure portability and to understand what C programmers are talking about</p>
+<p><a href="http://www.ericgiguere.com/articles/reading-c-declarations.html" target="_blank">how to parse C declarations</a>: even comes with a fun quiz at the end</p>
+<p>pointer to an array (the whole array!) and why its useful (Even though Eli Bendersky says: <a href="http://eli.thegreenplace.net/2010/01/11/pointers-to-arrays-in-c/" target="_blank">"<span>Truly, I can&rsquo;t imagine why one would use a pointer to an array in real life."</span></a></p>
+<p>rereading the HowTo on descriptors...again...</p>
+<p><strong>The Beginning... (certainly not the end)</strong></p>
+<p>Don't know if you made it this far, but there is TONS more to learn about the ctypes module as a foreign function library. And alternatives like a library called cffi. PyCon videos are a good source of info, too.</p>
+<p>UPDATE: The following article just came out in the Python Weekly Newsletter: <a href="http://jakevdp.github.io/blog/2014/05/09/why-python-is-slow/?utm_source=Python+Weekly+Newsletter&amp;utm_campaign=381ddfd1e2-Python_Weekly_Issue_139_May_15_2014&amp;utm_medium=email&amp;utm_term=0_9e26887fc5-381ddfd1e2-312710205" target="_blank">Why Python Is Slow: Looking Under the Hood</a> This post looks at types <strong>int</strong> and <strong>list</strong> under the hood with more info on ctypes module and provides good pictures too.</p>
